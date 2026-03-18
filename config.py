@@ -158,6 +158,8 @@ class Endpoints:
     PACKAGES_ACTIVE = "packages/v2/active"
     PACKAGES_ONHOLD = "packages/v2/onhold"
     PACKAGES_INACTIVE = "packages/v2/inactive"
+    PACKAGES_INTRANSIT = "packages/v2/intransit"
+    PACKAGES_TRANSFERRED = "packages/v2/transferred"
     PACKAGES_TYPES = "packages/v2/types"
     PACKAGES_ADJUST_REASONS = "packages/v2/adjust/reasons"
     PACKAGES_CREATE = "packages/v2/create"

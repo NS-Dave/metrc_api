@@ -19,6 +19,7 @@ from config import MetrcConfig
 from cultivation import CultivationClient
 from processing import ProcessingClient
 from supabase_config import get_connection_string
+from package_history import capture_history_before_update, create_initial_history_entry
 
 load_dotenv()
 
@@ -233,9 +234,13 @@ class MetrcHistoricalBackfill:
                 'location_name': package.get('LocationName'),
                 'note': package.get('Note'),
                 'last_modified': package.get('LastModified'),
-                'data': json.dumps(package)
+                'data': json.dumps(package),
+                'synced_at': datetime.now()
             }
             if exists:
+                # Capture history before updating
+                capture_history_before_update(cursor, data['label'], data, data['synced_at'])
+                
                 cursor.execute(
                     """
                     UPDATE metrc_packages SET
@@ -267,7 +272,8 @@ class MetrcHistoricalBackfill:
                         location_name = %(location_name)s,
                         note = %(note)s,
                         last_modified = %(last_modified)s,
-                        data = %(data)s
+                        data = %(data)s,
+                        synced_at = %(synced_at)s
                     WHERE id = %(id)s
                     """,
                     data,
@@ -287,7 +293,7 @@ class MetrcHistoricalBackfill:
                         is_trade_sample, is_testing_sample,
                         is_process_validation_test_sample, is_donation,
                         is_on_hold, archived_date, finished_date,
-                        location_name, note, last_modified, data
+                        location_name, note, last_modified, data, synced_at
                     ) VALUES (
                         %(id)s, %(label)s, %(package_type)s, %(license_number)s,
                         %(product_name)s, %(product_category_name)s, %(item_name)s,
@@ -299,11 +305,16 @@ class MetrcHistoricalBackfill:
                         %(is_trade_sample)s, %(is_testing_sample)s,
                         %(is_process_validation_test_sample)s, %(is_donation)s,
                         %(is_on_hold)s, %(archived_date)s, %(finished_date)s,
-                        %(location_name)s, %(note)s, %(last_modified)s, %(data)s
+                        %(location_name)s, %(note)s, %(last_modified)s, %(data)s,
+                        %(synced_at)s
                     )
                     """,
                     data,
                 )
+                
+                # Create initial history entry for new package
+                create_initial_history_entry(cursor, data, data['synced_at'])
+                
                 inserted += 1
         self.conn.commit()
         cursor.close()

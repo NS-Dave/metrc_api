@@ -34,7 +34,7 @@ class ProcessingClient:
         Get packages.
         
         Args:
-            status: 'active', 'onhold', or 'inactive'
+            status: 'active', 'onhold', 'inactive', 'intransit', or 'transferred'
             last_modified_start: Filter by last modified date
             last_modified_end: End of date range
             license_number: License number
@@ -45,7 +45,9 @@ class ProcessingClient:
         endpoint_map = {
             'active': Endpoints.PACKAGES_ACTIVE,
             'onhold': Endpoints.PACKAGES_ONHOLD,
-            'inactive': Endpoints.PACKAGES_INACTIVE
+            'inactive': Endpoints.PACKAGES_INACTIVE,
+            'intransit': Endpoints.PACKAGES_INTRANSIT,
+            'transferred': Endpoints.PACKAGES_TRANSFERRED
         }
         
         endpoint = endpoint_map.get(status.lower(), Endpoints.PACKAGES_ACTIVE)

@@ -116,17 +116,30 @@ packages = processing.get_packages('inactive', start, end, 'MP281433')
 ### Tables
 - **`metrc_harvests`**: Harvest tracking (harvest_name is unique identifier, NOT id)
 - **`metrc_packages`**: Package inventory (label is unique, id can change)
+- **`metrc_packages_history`**: Complete package state history (SCD2 pattern - NEW!)
 - **`metrc_plant_batches`**: Clone/seed batches
 - **`metrc_plants`**: Individual plants (vegetative, flowering, on-hold)
 - **`metrc_transfers`**: Manifests with direction (incoming/outgoing)
 - **`metrc_sync_log`**: Tracks all sync operations
 
 ### Important Views
+- **`active_packages`**: Truly active packages (is_finished=false, not archived) - USE THIS!
+- **`available_inventory`**: Active packages with quantity > 0
+- **`intransit_packages`**: Packages on manifests awaiting receipt
+- **`package_state_transitions`**: All package state changes with previous state
 - **`harvest_reconciliation`**: Pre-joined harvest→packages weight discrepancies (see note below)
 
-### Key Columns
-- `source_harvest_names`: JSONB array linking packages to harvests (use `@>` operator for queries)
+### Key Columns - metrc_packages
+- `label`: Unique package identifier (PRIMARY - use this for lookups!)
+- `endpoint_source`: Which API endpoint returned data ('active', 'inactive', 'intransit', 'transferred') - **DEBUG ONLY, NOT for business logic!**
+- `is_finished`: Boolean flag from API - **USE THIS to filter active packages**
+- `is_archived`: Boolean flag from API - **USE THIS to filter active packages**
+- `finished_date`: When package was finished
+- `archived_date`: When package was archived
+- `source_harvest_names`: Text linking packages to harvests
 - `data`: Full Metrc API response (JSONB)
+
+### Key Columns - metrc_transfers
 - `direction`: 'incoming' or 'outgoing' for transfers (critical—same ID can exist as both)
 
 ## Harvest Reconciliation (Major Use Case - IN PROGRESS)
@@ -156,9 +169,81 @@ When working on harvest reconciliation improvements, focus on validating the wei
 1. **Harvest name vs ID**: Use `HarvestName` (e.g., "H0001") as primary key, not API `Id` (changes over time)
 2. **Package label uniqueness**: Package `Label` is the true identifier, not `Id`
 3. **Transfer deduplication**: Dedupe by `(id, license_number, direction)`, NOT just `id`
-4. **Pagination**: Metrc API doesn't paginate—returns all results in single response
+4. **Pagination**: Most endpoints support pagination (v2 endpoints), but some don't
 5. **Rate limits**: ~10 req/sec. Client handles this with `requests_per_second` throttling
 6. **Schema evolution**: Many `.sql` migration files exist—check `MIGRATION_PLAN.md` before altering schema
+
+## ⚠️ CRITICAL: Metrc API Limitation
+
+**The Metrc API filters by `lastModified`, NOT by current state!**
+
+### The Problem
+When you call `/packages/v2/active`:
+- **Expected**: Currently active packages
+- **Actual**: Packages recently modified (even if now finished/archived!)
+
+**Real data**: 61.7% of packages from "active" endpoint are actually finished!
+
+###Package History Tracking (NEW!)
+
+**Problem Solved**: Track packages through their complete production journey over time.
+
+### Architecture
+- **`metrc_packages`**: Current state (15K rows, fast queries)
+- **`metrc_packages_history`**: Complete timeline (296K rows/year, ~1 GB/year)
+- **Pattern**: Slowly Changing Dimension Type 2 (SCD2)
+
+### Key Features
+- Captures every package state change with timestamps
+- Tracks quantity changes, state transitions, location movements
+- Enables "time travel" queries (what was package state on date X?)
+- Complete audit trail for compliance
+
+### Usage
+```sql
+-- Get complete package timeline
+SELECT * FROM get_package_timeline('1A40A030000C289000029893');
+
+-- Time travel: package state on specific date
+SELECT * FROM get_package_at_time('LABEL', '2025-12-01');
+
+-- Track harvest weight over time
+SELECT DATE(valid_from), SUM(quantity) 
+FROM metrc_packages_history
+WHERE source_harvest_names LIKE '%HARVEST%'
+GROUP BY DATE(valid_from);
+```
+
+See [PACKAGE_HISTORY_GUIDE.md](PACKAGE_HISTORY_GUIDE.md) for complete documentation.
+
+## When Making Changes
+
+1. **New endpoints**: Add to `Endpoints` class in [config.py](config.py), implement in [cultivation.py](cultivation.py) or [processing.py](processing.py)
+2. **Schema changes**: Create numbered `.sql` migration file, update `MIGRATION_PLAN.md`
+3. **New sync types**: Extend `MetrcSupabaseSync` class in [metrc_daily_sync.py](metrc_daily_sync.py)
+4. **Testing**: Create `test_*.py` or `check_*.py` script, don't modify production sync directly
+5. **Package queries**: Use `active_packages` view or status flags, NEVER `endpoint_source`
+SELECT * FROM active_packages WHERE license_number = 'MC281599';
+
+-- OR manually:
+SELECT * FROM metrc_packages 
+WHERE is_finished = false 
+  AND archived_date IS NULL 
+  AND (is_archived = false OR is_archived IS NULL);
+```
+
+**❌ WRONG** - Don't use endpoint_source:
+```sql
+SELECT * FROM metrc_packages WHERE endpoint_source = 'active';
+-- Returns 8,559 packages (includes 5,119 finished ones!)
+```
+
+### Why This Happens
+When a package finishes, it gets a `lastModified` update. The next incremental sync pulls it from `/packages/v2/active` because it was recently modified, even though it's now finished. We tag it with `endpoint_source='active'` but `is_finished=true`.
+
+**Key Insight**: `endpoint_source` = "where we got the data" (debugging), `is_finished`/`is_archived` = "actual state" (business logic)
+
+See [PACKAGE_FILTERING_GUIDE.md](PACKAGE_FILTERING_GUIDE.md) for complete explanation.
 
 ## Testing
 - **`simple_test.py`**: Basic connection test

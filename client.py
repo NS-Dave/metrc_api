@@ -296,6 +296,8 @@ class MetrcClient:
             'packages/v2/active',
             'packages/v2/onhold',
             'packages/v2/inactive',
+            'packages/v2/intransit',
+            'packages/v2/transferred',
             'harvests/v2/active',
             'harvests/v2/onhold',
             'harvests/v2/inactive',

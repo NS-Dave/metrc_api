@@ -34,6 +34,7 @@ from client import MetrcClient
 from cultivation import CultivationClient
 from processing import ProcessingClient
 from supabase_config import get_connection_string
+from package_history import capture_history_before_update, create_initial_history_entry
 
 
 class PackageSyncTool:
@@ -169,6 +170,9 @@ class PackageSyncTool:
             }
             
             if exists:
+                # Capture history before updating
+                capture_history_before_update(cursor, data['label'], data, data['synced_at'])
+                
                 # Update - comprehensive field update
                 cursor.execute("""
                     UPDATE metrc_packages SET
@@ -306,6 +310,10 @@ class PackageSyncTool:
                         %(data)s, %(synced_at)s
                     )
                 """, data)
+                
+                # Create initial history entry for new package
+                create_initial_history_entry(cursor, data, data['synced_at'])
+                
                 result = 'inserted'
             
             self.conn.commit()

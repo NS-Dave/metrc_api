@@ -22,7 +22,8 @@ from config import MetrcConfig
 from client import MetrcClient
 from cultivation import CultivationClient
 from processing import ProcessingClient
-from supabase_config import get_connection_string
+from supabase_config import get_connection_string, get_connection
+from package_history import capture_history_before_update, create_initial_history_entry
 
 # License configuration
 CULTIVATION_LICENSE = os.getenv('METRC_LICENSE_CULTIVATION', 'MC281599')
@@ -45,9 +46,9 @@ class MetrcSupabaseSync:
         self.conn = None
         
     def connect_supabase(self):
-        """Connect to Supabase database."""
+        """Connect to Supabase database with schema-aware search_path."""
         if self.conn is None or self.conn.closed:
-            self.conn = psycopg2.connect(self.conn_string)
+            self.conn = get_connection()
             self.conn.autocommit = False
         
     def close(self):
@@ -217,14 +218,30 @@ class MetrcSupabaseSync:
         updated = 0
         
         for package in packages:
-            # Check if exists
-            cursor.execute("SELECT id FROM metrc_packages WHERE id = %s", (package['Id'],))
-            exists = cursor.fetchone() is not None
+            # Handle different response formats:
+            # - Regular packages (active/inactive/onhold): have 'Id' and 'Label' at top level
+            # - Transfer packages (intransit/transferred): have 'PackageId' and 'PackageLabel'
+            package_id = package.get('Id') or package.get('PackageId')
+            package_label = package.get('Label') or package.get('PackageLabel')
+            
+            if not package_id or not package_label:
+                print(f"  Warning: Skipping package with missing Id or Label: {package}")
+                continue
+            
+            # Check if exists by label OR id
+            # Note: Packages can appear in multiple endpoints (active, inactive, intransit, transferred)
+            # The label is the true unique identifier, but we also check by id to avoid conflicts
+            cursor.execute("""
+                SELECT id FROM metrc_packages
+                WHERE label = %s OR id = %s
+            """, (package_label, package_id))
+            existing = cursor.fetchone()
+            exists = existing is not None
             
             # Prepare data
             data = {
-                'id': package['Id'],
-                'label': package['Label'],
+                'id': package_id,
+                'label': package_label,
                 'package_type': package.get('PackageType'),
                 'license_number': license_number,
                 'product_name': package.get('Item', {}).get('Name') if isinstance(package.get('Item'), dict) else package.get('ProductName'),
@@ -262,6 +279,7 @@ class MetrcSupabaseSync:
                 # Status flags
                 'is_donation_persistent': package.get('IsDonationPersistent', False),
                 'is_finished': package.get('IsFinished', False),
+                'is_archived': package.get('IsArchived', False),
                 'is_on_hold_combined': package.get('IsOnHoldCombined', False),
                 'is_on_retailer_delivery': package.get('IsOnRetailerDelivery', False),
                 'is_process_validation_testing_sample': package.get('IsProcessValidationTestingSample', False),
@@ -303,10 +321,13 @@ class MetrcSupabaseSync:
                 'unit_of_measure_abbreviation': package.get('UnitOfMeasureAbbreviation'),
                 'data': json.dumps(package),
                 'synced_at': datetime.now(),
-                'package_status': status  # Track which endpoint returned this package
+                'endpoint_source': status  # Track which endpoint returned this package
             }
             
             if exists:
+                # Capture history before updating
+                capture_history_before_update(cursor, package_label, data, data['synced_at'])
+                
                 # Update existing
                 cursor.execute("""
                     UPDATE metrc_packages SET
@@ -346,6 +367,7 @@ class MetrcSupabaseSync:
                         item_from_facility_name = %(item_from_facility_name)s,
                         is_donation_persistent = %(is_donation_persistent)s,
                         is_finished = %(is_finished)s,
+                        is_archived = %(is_archived)s,
                         is_on_hold_combined = %(is_on_hold_combined)s,
                         is_on_retailer_delivery = %(is_on_retailer_delivery)s,
                         is_process_validation_testing_sample = %(is_process_validation_testing_sample)s,
@@ -382,8 +404,8 @@ class MetrcSupabaseSync:
                         unit_of_measure_abbreviation = %(unit_of_measure_abbreviation)s,
                         data = %(data)s,
                         synced_at = %(synced_at)s,
-                        package_status = %(package_status)s
-                    WHERE id = %(id)s
+                        endpoint_source = %(endpoint_source)s
+                    WHERE label = %(label)s
                 """, data)
                 updated += 1
             else:
@@ -402,7 +424,7 @@ class MetrcSupabaseSync:
                         received_datetime, received_from_manifest_number,
                         received_from_facility_license_number, received_from_facility_name,
                         item_from_facility_license_number, item_from_facility_name,
-                        is_donation_persistent, is_finished, is_on_hold_combined, is_on_retailer_delivery,
+                        is_donation_persistent, is_finished, is_archived, is_on_hold_combined, is_on_retailer_delivery,
                         is_process_validation_testing_sample, is_trade_sample_persistent,
                         location_id, location_type_name, sublocation_id, sublocation_name,
                         decontamination_date, expiration_date, lab_test_result_expiration_datetime,
@@ -415,7 +437,7 @@ class MetrcSupabaseSync:
                         external_id, original_package_quantity, package_for_product_destruction,
                         patient_license_number, product_requires_decontamination, product_requires_remediation,
                         unit_of_measure_abbreviation,
-                        data, synced_at, package_status
+                        data, synced_at, endpoint_source
                     ) VALUES (
                         %(id)s, %(label)s, %(package_type)s, %(license_number)s,
                         %(product_name)s, %(product_category_name)s, %(item_name)s, %(item_id)s,
@@ -429,7 +451,7 @@ class MetrcSupabaseSync:
                         %(received_datetime)s, %(received_from_manifest_number)s,
                         %(received_from_facility_license_number)s, %(received_from_facility_name)s,
                         %(item_from_facility_license_number)s, %(item_from_facility_name)s,
-                        %(is_donation_persistent)s, %(is_finished)s, %(is_on_hold_combined)s, %(is_on_retailer_delivery)s,
+                        %(is_donation_persistent)s, %(is_finished)s, %(is_archived)s, %(is_on_hold_combined)s, %(is_on_retailer_delivery)s,
                         %(is_process_validation_testing_sample)s, %(is_trade_sample_persistent)s,
                         %(location_id)s, %(location_type_name)s, %(sublocation_id)s, %(sublocation_name)s,
                         %(decontamination_date)s, %(expiration_date)s, %(lab_test_result_expiration_datetime)s,
@@ -442,9 +464,13 @@ class MetrcSupabaseSync:
                         %(external_id)s, %(original_package_quantity)s, %(package_for_product_destruction)s,
                         %(patient_license_number)s, %(product_requires_decontamination)s, %(product_requires_remediation)s,
                         %(unit_of_measure_abbreviation)s,
-                        %(data)s, %(synced_at)s, %(package_status)s
+                        %(data)s, %(synced_at)s, %(endpoint_source)s
                     )
                 """, data)
+                
+                # Create initial history entry for new package
+                create_initial_history_entry(cursor, data, data['synced_at'])
+                
                 inserted += 1
         
         self.conn.commit()
@@ -506,7 +532,7 @@ class MetrcSupabaseSync:
                     # Add to transfer object for JSON storage
                     transfer['Deliveries'] = [{'Packages': packages, 'Id': delivery_id}]
                     packages_enriched += 1
-                    print(f"        ✓ Stored {stored_count} packages for transfer {manifest}")
+                    print(f"        [OK] Stored {stored_count} packages for transfer {manifest}")
                 
                 # Fetch and store transporter details (separate try/catch to not fail entire enrichment)
                 try:
@@ -521,7 +547,7 @@ class MetrcSupabaseSync:
                     pass
                     
             except Exception as e:
-                print(f"      ✗ Transfer enrichment failed for {manifest}: {e}")
+                print(f"      [ERROR] Transfer enrichment failed for {manifest}: {e}")
                 # Rollback any failed transaction so subsequent transfers can continue
                 try:
                     if self.conn:
@@ -532,9 +558,9 @@ class MetrcSupabaseSync:
             enriched.append(transfer)
         
         if packages_enriched > 0:
-            print(f"      ✓ Enriched {packages_enriched} transfers with package data")
+            print(f"      [OK] Enriched {packages_enriched} transfers with package data")
         if transporters_enriched > 0:
-            print(f"      ✓ Enriched {transporters_enriched} transfers with transporter data")
+            print(f"      [OK] Enriched {transporters_enriched} transfers with transporter data")
 
         return enriched
     
@@ -612,12 +638,15 @@ class MetrcSupabaseSync:
             # Upsert to Supabase
             inserted, updated = self.upsert_harvests(all_harvests, license_number)
             
-            print(f"  ✓ Inserted {inserted}, Updated {updated}")
-            
+            print(f"  [OK] Inserted {inserted}, Updated {updated}")
+
             self.log_sync_end(sync_id, len(all_harvests), inserted, updated)
-            
+
         except Exception as e:
-            print(f"  ✗ Error: {e}")
+            print(f"  [ERROR] Error: {e}")
+            # Rollback the failed transaction before trying to log
+            if self.conn and not self.conn.closed:
+                self.conn.rollback()
             self.log_sync_end(sync_id, 0, 0, 0, 'failed', str(e))
             raise
     
@@ -658,33 +687,40 @@ class MetrcSupabaseSync:
             
             # Get in-transit packages (packages currently being transferred)
             try:
-                intransit_response = self.processing.client.get(
-                    'packages/v2/intransit',
-                    params={},
-                    license_number=license_number,
-                    paginate=True
-                )
+                intransit_response = self.processing.get_packages('intransit', license_number=license_number)
                 intransit_packages = intransit_response if isinstance(intransit_response, list) else []
             except Exception as e:
                 print(f"  Note: Could not fetch intransit packages: {e}")
                 intransit_packages = []
             
-            print(f"  Found {len(active_packages)} active, {len(inactive_packages)} inactive, {len(intransit_packages)} intransit = {len(active_packages) + len(inactive_packages) + len(intransit_packages)} total")
+            # Get transferred packages (packages that have been sent out)
+            try:
+                transferred_response = self.processing.get_packages('transferred', license_number=license_number)
+                transferred_packages = transferred_response if isinstance(transferred_response, list) else []
+            except Exception as e:
+                print(f"  Note: Could not fetch transferred packages: {e}")
+                transferred_packages = []
+            
+            print(f"  Found {len(active_packages)} active, {len(inactive_packages)} inactive, {len(intransit_packages)} intransit, {len(transferred_packages)} transferred = {len(active_packages) + len(inactive_packages) + len(intransit_packages) + len(transferred_packages)} total")
             
             # Upsert to Supabase with status tracking
             inserted_active, updated_active = self.upsert_packages(active_packages, license_number, status='active')
             inserted_inactive, updated_inactive = self.upsert_packages(inactive_packages, license_number, status='inactive')
             inserted_intransit, updated_intransit = self.upsert_packages(intransit_packages, license_number, status='intransit')
+            inserted_transferred, updated_transferred = self.upsert_packages(transferred_packages, license_number, status='transferred')
             
-            total_inserted = inserted_active + inserted_inactive + inserted_intransit
-            total_updated = updated_active + updated_inactive + updated_intransit
+            total_inserted = inserted_active + inserted_inactive + inserted_intransit + inserted_transferred
+            total_updated = updated_active + updated_inactive + updated_intransit + updated_transferred
             
-            print(f"  ✓ Inserted {total_inserted}, Updated {total_updated}")
-            
-            self.log_sync_end(sync_id, len(active_packages) + len(inactive_packages) + len(intransit_packages), total_inserted, total_updated)
-            
+            print(f"  [OK] Inserted {total_inserted}, Updated {total_updated}")
+
+            self.log_sync_end(sync_id, len(active_packages) + len(inactive_packages) + len(intransit_packages) + len(transferred_packages), total_inserted, total_updated)
+
         except Exception as e:
-            print(f"  ✗ Error: {e}")
+            print(f"  [ERROR] Error: {e}")
+            # Rollback the failed transaction before trying to log
+            if self.conn and not self.conn.closed:
+                self.conn.rollback()
             self.log_sync_end(sync_id, 0, 0, 0, 'failed', str(e))
             raise
     
@@ -749,12 +785,15 @@ class MetrcSupabaseSync:
             # Upsert to Supabase
             inserted, updated = self.upsert_transfers(enriched_transfers, license_number)
             
-            print(f"  ✓ Inserted {inserted}, Updated {updated}")
-            
+            print(f"  [OK] Inserted {inserted}, Updated {updated}")
+
             self.log_sync_end(sync_id, len(unique_transfers), inserted, updated)
-            
+
         except Exception as e:
-            print(f"  ✗ Error: {e}")
+            print(f"  [ERROR] Error: {e}")
+            # Rollback the failed transaction before trying to log
+            if self.conn and not self.conn.closed:
+                self.conn.rollback()
             self.log_sync_end(sync_id, 0, 0, 0, 'failed', str(e))
             raise
     
@@ -797,7 +836,7 @@ class MetrcSupabaseSync:
             if all_plants:
                 inserted, updated = self.upsert_plants(all_plants, license_number)
                 total_plants = len(all_plants)
-                print(f"  ✓ Plants: {inserted} inserted, {updated} updated")
+                print(f"  [OK] Plants: {inserted} inserted, {updated} updated")
             
             # Sync plant batches
             all_batches = []
@@ -822,12 +861,15 @@ class MetrcSupabaseSync:
             if all_batches:
                 inserted, updated = self.upsert_plant_batches(all_batches, license_number)
                 total_batches = len(all_batches)
-                print(f"  ✓ Plant Batches: {inserted} inserted, {updated} updated")
+                print(f"  [OK] Plant Batches: {inserted} inserted, {updated} updated")
             
             self.log_sync_end(sync_id, total_plants + total_batches, 0, 0)
             
         except Exception as e:
-            print(f"  ✗ Error: {e}")
+            print(f"  [ERROR] Error: {e}")
+            # Rollback the failed transaction before trying to log
+            if self.conn and not self.conn.closed:
+                self.conn.rollback()
             self.log_sync_end(sync_id, 0, 0, 0, 'failed', str(e))
             raise
     
@@ -1331,13 +1373,13 @@ def run_daily_sync():
         print("Testing Metrc API connection...")
         if not syncer.metrc_client.test_connection():
             raise Exception("Failed to connect to Metrc API")
-        print("✓ Metrc API connected")
+        print("[OK] Metrc API connected")
         print()
-        
+
         # Test Supabase connection
         print("Testing Supabase connection...")
         syncer.connect_supabase()
-        print("✓ Supabase connected")
+        print("[OK] Supabase connected")
         print()
         
         # Sync cultivation license (MC281599)
@@ -1358,13 +1400,13 @@ def run_daily_sync():
         print()
         
         print("=" * 70)
-        print("✓ DAILY SYNC COMPLETED SUCCESSFULLY")
+        print("[SUCCESS] DAILY SYNC COMPLETED SUCCESSFULLY")
         print("=" * 70)
         
     except Exception as e:
         print()
         print("=" * 70)
-        print(f"✗ SYNC FAILED: {e}")
+        print(f"[ERROR] SYNC FAILED: {e}")
         print("=" * 70)
         raise
         
