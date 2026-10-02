@@ -47,3 +47,25 @@ def test_sync_harvests_passes_list_responses_to_upsert():
     assert captured["names"][0] == "ACTIVE-1"
     assert "INACTIVE-1" in captured["names"]
     assert captured["pulled"] == len(captured["names"]) >= 2
+
+
+def test_map_harvest_includes_counts_and_packaged_weight():
+    out = MetrcSupabaseSync._map_harvest({
+        "Id": 5, "Name": "KOKU R9C15 12/22/23", "HarvestType": "Product",
+        "CurrentWeight": 100.5, "UnitOfWeightName": "Grams", "IsFinished": False,
+        "SourceStrainNames": "Kosher Kush", "DryingLocationName": "Dry Room 3",
+        "HarvestStartDate": "2023-12-22", "LastModified": "2023-12-23T01:00:00Z",
+        "TotalWasteWeight": 3.0, "TotalWetWeight": 168894.0,
+        "PlantCount": 184, "PackageCount": 2, "TotalPackagedWeight": 34000.0,
+    })
+    assert out["sourcePlantCount"] == 184
+    assert out["packageCount"] == 2
+    assert out["totalPackagedWeight"] == 34000.0
+    assert out["totalWetWeight"] == 168894.0
+
+
+def test_map_harvest_finished_flag_comes_from_finished_date():
+    base = {"Id": 1, "Name": "X"}
+    assert MetrcSupabaseSync._map_harvest({**base, "FinishedDate": "2026-01-06"})["isFinished"] is True
+    assert MetrcSupabaseSync._map_harvest({**base, "FinishedDate": None})["isFinished"] is False
+    assert MetrcSupabaseSync._map_harvest(base)["isFinished"] is False

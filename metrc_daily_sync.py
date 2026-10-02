@@ -238,7 +238,8 @@ class MetrcSupabaseSync:
             'harvestType': h.get('HarvestType'),
             'currentWeight': h.get('CurrentWeight'),
             'unitOfWeight': h.get('UnitOfWeightName') or 'Grams',
-            'isFinished': h.get('IsFinished', False),
+            # v2 harvest payloads carry no IsFinished key; FinishedDate is the signal.
+            'isFinished': bool(h.get('IsFinished') or h.get('FinishedDate')),
             'strainName': h.get('SourceStrainNames'),
             'dryingLocationName': h.get('DryingLocationName'),
             'harvestStartDate': h.get('HarvestStartDate'),
@@ -247,6 +248,9 @@ class MetrcSupabaseSync:
             'totalWasteWeight': h.get('TotalWasteWeight'),
             'totalWetWeight': h.get('TotalWetWeight'),
             'totalRestorativeWasteWeight': h.get('TotalRestorativeWasteWeight'),
+            'sourcePlantCount': h.get('PlantCount'),
+            'packageCount': h.get('PackageCount'),
+            'totalPackagedWeight': h.get('TotalPackagedWeight'),
         }
 
     @staticmethod
