@@ -69,3 +69,24 @@ def test_map_harvest_finished_flag_comes_from_finished_date():
     assert MetrcSupabaseSync._map_harvest({**base, "FinishedDate": "2026-01-06"})["isFinished"] is True
     assert MetrcSupabaseSync._map_harvest({**base, "FinishedDate": None})["isFinished"] is False
     assert MetrcSupabaseSync._map_harvest(base)["isFinished"] is False
+
+
+from backfill_harvests import day_windows
+
+
+def test_day_windows_covers_range_in_24h_steps():
+    w = day_windows(datetime(2026, 2, 1), datetime(2026, 2, 3, 12))
+    assert w == [
+        (datetime(2026, 2, 1), datetime(2026, 2, 2)),
+        (datetime(2026, 2, 2), datetime(2026, 2, 3)),
+        (datetime(2026, 2, 3), datetime(2026, 2, 3, 12)),
+    ]
+
+
+def test_day_windows_empty_when_start_not_before_end():
+    assert day_windows(datetime(2026, 2, 2), datetime(2026, 2, 2)) == []
+
+
+def test_map_harvest_archived_counts_as_finished():
+    out = MetrcSupabaseSync._map_harvest({"Id": 1, "Name": "X", "ArchivedDate": "2026-03-06"})
+    assert out["isFinished"] is True

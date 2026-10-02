@@ -239,7 +239,8 @@ class MetrcSupabaseSync:
             'currentWeight': h.get('CurrentWeight'),
             'unitOfWeight': h.get('UnitOfWeightName') or 'Grams',
             # v2 harvest payloads carry no IsFinished key; FinishedDate is the signal.
-            'isFinished': bool(h.get('IsFinished') or h.get('FinishedDate')),
+            # Empty harvests can be archived without ever being finished.
+            'isFinished': bool(h.get('IsFinished') or h.get('FinishedDate') or h.get('ArchivedDate')),
             'strainName': h.get('SourceStrainNames'),
             'dryingLocationName': h.get('DryingLocationName'),
             'harvestStartDate': h.get('HarvestStartDate'),
