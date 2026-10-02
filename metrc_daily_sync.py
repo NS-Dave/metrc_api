@@ -200,6 +200,21 @@ class MetrcSupabaseSync:
 
     # ── METRC API → NSOS column mappers ──────────────────────────────────────
     @staticmethod
+    def _records(resp) -> list:
+        """Normalise a METRC response to a list of records.
+
+        MetrcClient.get() returns a plain list for paginated endpoints and a
+        {'Data': [...]} dict (or a bare list) for the rest. Treating only the
+        dict shape as valid silently dropped every harvest from 2026-02 to
+        2026-10.
+        """
+        if isinstance(resp, list):
+            return resp
+        if isinstance(resp, dict):
+            return resp.get('Data') or []
+        return []
+
+    @staticmethod
     def _as_array(v):
         """Coerce a METRC value into a Python list for a Postgres text[] column.
 
@@ -377,7 +392,7 @@ class MetrcSupabaseSync:
         try:
             # Get active harvests
             active_response = self.cultivation.get_harvests('active', license_number=license_number)
-            active_harvests = active_response['Data'] if isinstance(active_response, dict) and 'Data' in active_response else []
+            active_harvests = self._records(active_response)
             
             # Get inactive harvests in last 48 hours (in 24-hour chunks to avoid API limit)
             inactive_harvests = []
@@ -395,7 +410,7 @@ class MetrcSupabaseSync:
                     last_modified_start=start_str,
                     last_modified_end=end_str
                 )
-                chunk = chunk_response['Data'] if isinstance(chunk_response, dict) and 'Data' in chunk_response else []
+                chunk = self._records(chunk_response)
                 inactive_harvests.extend(chunk)
                 
                 current_start = current_end
