@@ -12,7 +12,7 @@ load_dotenv()
 
 import psycopg2
 from psycopg2.extras import execute_values
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from typing import List, Dict, Optional
@@ -254,6 +254,7 @@ class MetrcSupabaseSync:
             'packagedDate': p.get('PackagedDate'),
             'receivedDate': p.get('ReceivedDateTime'),
             'finishedDate': p.get('FinishedDate'),
+            'archivedDate': p.get('ArchivedDate'),  # 2026-08-24 audit: archived packages must not linger as Active
             'lastModifiedAt': p.get('LastModified'),
             'sourceHarvestNames': MetrcSupabaseSync._as_array(p.get('SourceHarvestNames')),
             'sourcePackageLabels': MetrcSupabaseSync._as_array(p.get('SourcePackageLabels')),
@@ -418,40 +419,57 @@ class MetrcSupabaseSync:
             self.log_sync_end(sync_id, 0, 0, 0, 'failed', str(e))
             raise
     
+    def _last_successful_package_sync(self, license_number: str):
+        """Start of the most recent completed packages sync for this license (local naive dt)."""
+        self.connect_supabase()
+        cur = self.conn.cursor()
+        cur.execute("""
+            SELECT max(sync_start) FROM metrc_sync_log
+            WHERE entity_type = 'packages' AND license_number = %s
+              AND status = 'completed'
+        """, (license_number,))
+        row = cur.fetchone()
+        cur.close()
+        return row[0].astimezone(timezone.utc).replace(tzinfo=None) if row and row[0] else None
+
     def sync_packages_incremental(self, license_number: str, hours: int = 48):
-        """Sync packages modified in last N hours from active, inactive, and intransit endpoints."""
-        print(f"Syncing packages for {license_number} (last {hours} hours)...")
-        
-        end = datetime.now()
+        """Sync packages via explicit lastModified windows (2026-08-24 audit fix).
+
+        Both current-state endpoints (active, inactive) are pulled with explicit
+        24h-chunked lastModifiedStart/End windows instead of Metrc's implicit
+        default window (which demonstrably skipped the 8/12 transfer receipts).
+        The window start self-heals back to the last successful packages sync,
+        so a failed or skipped run is caught up instead of lost forever.
+        """
+        # Window math is in UTC: Metrc reads bare lastModified timestamps as UTC,
+        # so local-time windows would trail the present by the UTC offset.
+        end = datetime.now(timezone.utc).replace(tzinfo=None)
         start = end - timedelta(hours=hours)
-        
+        last_ok = self._last_successful_package_sync(license_number)
+        if last_ok and last_ok - timedelta(hours=2) < start:
+            start = last_ok - timedelta(hours=2)  # catch up over missed/failed runs
+        print(f"Syncing packages for {license_number} ({start:%Y-%m-%d %H:%M} -> {end:%Y-%m-%d %H:%M} UTC)...")
+
         sync_id = self.log_sync_start('packages', license_number, 'incremental', start, end)
-        
+
         try:
-            # Get active packages
-            active_response = self.processing.get_packages('active', license_number=license_number)
-            active_packages = active_response['Data'] if isinstance(active_response, dict) and 'Data' in active_response else active_response
-            
-            # Get inactive packages in last 48 hours (in 24-hour chunks)
-            inactive_packages = []
-            current_start = start
-            
-            while current_start < end:
-                current_end = min(current_start + timedelta(hours=24), end)
-                
-                start_str = current_start.strftime('%Y-%m-%dT%H:%M:%S')
-                end_str = current_end.strftime('%Y-%m-%dT%H:%M:%S')
-                
-                chunk_response = self.processing.get_packages(
-                    'inactive',
-                    license_number=license_number,
-                    last_modified_start=start_str,
-                    last_modified_end=end_str
-                )
-                chunk = chunk_response['Data'] if isinstance(chunk_response, dict) and 'Data' in chunk_response else chunk_response
-                inactive_packages.extend(chunk)
-                
-                current_start = current_end
+            def windowed(status):
+                rows, current_start = [], start
+                while current_start < end:
+                    current_end = min(current_start + timedelta(hours=24), end)
+                    resp = self.processing.get_packages(
+                        status,
+                        license_number=license_number,
+                        last_modified_start=current_start.strftime('%Y-%m-%dT%H:%M:%S'),
+                        last_modified_end=current_end.strftime('%Y-%m-%dT%H:%M:%S')
+                    )
+                    chunk = resp['Data'] if isinstance(resp, dict) and 'Data' in resp else resp
+                    rows.extend(chunk or [])
+                    current_start = current_end
+                return rows
+
+            active_packages = windowed('active')
+            inactive_packages = windowed('inactive')
             
             # Get in-transit packages (packages currently being transferred)
             try:
@@ -471,11 +489,15 @@ class MetrcSupabaseSync:
             
             print(f"  Found {len(active_packages)} active, {len(inactive_packages)} inactive, {len(intransit_packages)} intransit, {len(transferred_packages)} transferred = {len(active_packages) + len(inactive_packages) + len(intransit_packages) + len(transferred_packages)} total")
             
-            # Upsert to Supabase with status tracking
-            inserted_active, updated_active = self.upsert_packages(active_packages, license_number, status='active')
-            inserted_inactive, updated_inactive = self.upsert_packages(inactive_packages, license_number, status='inactive')
+            # Upsert to Supabase with status tracking.
+            # ORDER MATTERS (2026-08-24 audit fix): intransit/transferred report
+            # membership history and force a state; active/inactive report CURRENT
+            # state and must be applied last so a package returned to this
+            # facility is never re-stamped Inactive by the transferred endpoint.
             inserted_intransit, updated_intransit = self.upsert_packages(intransit_packages, license_number, status='intransit')
             inserted_transferred, updated_transferred = self.upsert_packages(transferred_packages, license_number, status='transferred')
+            inserted_inactive, updated_inactive = self.upsert_packages(inactive_packages, license_number, status='inactive')
+            inserted_active, updated_active = self.upsert_packages(active_packages, license_number, status='active')
             
             total_inserted = inserted_active + inserted_inactive + inserted_intransit + inserted_transferred
             total_updated = updated_active + updated_inactive + updated_intransit + updated_transferred

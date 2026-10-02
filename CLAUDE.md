@@ -13,6 +13,23 @@ MP281433 (processing). Heartbeat name: `metrc`. Root invariants: `C:\python\CLAU
 - DB-side audit trail: `metrc_sync_log` table (note: `metrc_sync_logs` also exists but
   is empty/legacy — write to `metrc_sync_log`).
 
+## ⚠️ TRAP (resolved): `metrc_connections` is an ID map, not a status table
+
+Its sync-status/counter columns (`lastSyncAt`, `lastSyncStatus`, api-call counters,
+etc.) were unmaintained NSOS-module leftovers frozen at 2026-02-10; on 2026-08-24 a
+coworker's agent read them and falsely reported Metrc data as stale, so they were
+**dropped that day** (migration `drop_metrc_connections_stale_status_columns`). The
+table remains solely the license → connection-id map used by `metrc_daily_sync.py`
+and `build_metrc_140_report.py`. Freshness truth lives in: `metrc_sync_log`
+(per-entity daily rows), `pipeline_runs` (heartbeat `metrc`), and
+`MAX(metrc_packages."lastModifiedAt")` for actual data recency.
+
+**Expected weekend rhythm:** MC281599 (cultivation) pulls thousands of records on
+weekday runs but only ~25–60 on Sunday/Monday runs — the facility doesn't package on
+weekends. Verified across 8/9–10, 8/16–17, 8/23–24. Sunday/Monday dips (and ~11s run
+durations) are normal; the tell for a REAL problem is a low pull count on a
+Tuesday–Saturday run, or `MAX("lastModifiedAt")` falling behind the last business day.
+
 ## Data notes & traps
 
 - This is **compliance data** — reconciliation against METRC is the ground truth for
