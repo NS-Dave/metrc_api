@@ -1,6 +1,6 @@
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -90,3 +90,24 @@ def test_day_windows_empty_when_start_not_before_end():
 def test_map_harvest_archived_counts_as_finished():
     out = MetrcSupabaseSync._map_harvest({"Id": 1, "Name": "X", "ArchivedDate": "2026-03-06"})
     assert out["isFinished"] is True
+
+
+
+def test_transfer_windows_are_timestamps_not_dates():
+    """A 24-hour window spans 25 wall-clock hours across the fall DST change and Metrc rejects it."""
+    s = object.__new__(MetrcSupabaseSync)
+    windows = []
+
+    class _Proc:
+        def get_incoming_transfers(self, license_number=None, last_modified_start=None, last_modified_end=None):
+            windows.append((last_modified_start, last_modified_end)); return {"Data": []}
+        get_outgoing_transfers = get_incoming_transfers
+    s.processing = _Proc(); s.conn = None
+    s.log_sync_start = lambda *a, **k: 1
+    s.log_sync_end = lambda *a, **k: None
+    s.enrich_transfers_with_deliveries = lambda t, lic: t
+    s.upsert_transfers = lambda t, lic: (0, 0)
+    s.sync_transfers_incremental("MC281599", days=2)
+    assert windows and all("T" in a and "T" in b for a, b in windows)
+    for a, b in windows:
+        assert (datetime.fromisoformat(b) - datetime.fromisoformat(a)) <= timedelta(hours=23)

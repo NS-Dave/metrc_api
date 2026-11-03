@@ -26,6 +26,9 @@ from supabase_config import get_connection_string, get_connection
 from package_history import capture_history_before_update, create_initial_history_entry
 
 # License configuration
+# lastModified windows: Metrc allows at most 24 wall-clock hours and counts the fall DST
+# change as an extra hour, so every window is 23 hours.
+WINDOW_HOURS = 23
 CULTIVATION_LICENSE = os.getenv('METRC_LICENSE_CULTIVATION', 'MC281599')
 PROCESSING_LICENSE = os.getenv('METRC_LICENSE_PROCESSING', 'MP281433')
 
@@ -476,7 +479,7 @@ class MetrcSupabaseSync:
             def windowed(status):
                 rows, current_start = [], start
                 while current_start < end:
-                    current_end = min(current_start + timedelta(hours=24), end)
+                    current_end = min(current_start + timedelta(hours=WINDOW_HOURS), end)
                     resp = self.processing.get_packages(
                         status,
                         license_number=license_number,
@@ -537,8 +540,13 @@ class MetrcSupabaseSync:
     def sync_transfers_incremental(self, license_number: str, days: int = 7):
         """Sync transfers for last N days (chunked into 24-hour windows)."""
         print(f"Syncing transfers for {license_number} (last {days} days)...")
-        
-        end = datetime.now()
+
+        # Windows are explicit timestamps in 23-hour chunks. Metrc measures the range on the
+        # Eastern wall clock, so a 24-hour window that spans the fall DST change is 25 hours
+        # and is rejected ("Last Modified range cannot exceed 24 hours"); date-only windows
+        # hit the same wall. That rejection aborted every run from 2026-11-02 and skipped the
+        # MP281433 packages until fixed on 2026-11-03.
+        end = datetime.now(timezone.utc).replace(tzinfo=None)
         start = end - timedelta(days=days)
         
         sync_id = self.log_sync_start('transfers', license_number, 'incremental', start, end)
@@ -549,10 +557,9 @@ class MetrcSupabaseSync:
             current = start
             
             while current < end:
-                # Each chunk is 24 hours
-                chunk_end = min(current + timedelta(hours=24), end)
-                start_str = current.strftime('%Y-%m-%d')
-                end_str = chunk_end.strftime('%Y-%m-%d')
+                chunk_end = min(current + timedelta(hours=WINDOW_HOURS), end)
+                start_str = current.strftime('%Y-%m-%dT%H:%M:%S')
+                end_str = chunk_end.strftime('%Y-%m-%dT%H:%M:%S')
                 
                 # Get incoming transfers
                 incoming_response = self.processing.get_incoming_transfers(
